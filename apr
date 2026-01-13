@@ -2490,7 +2490,7 @@ run_round() {
         echo "    --write-output \"$output_file\" \\" >&2
         [[ "$manual_login" == "true" ]] && echo "    --browser-manual-login \\" >&2
         [[ "$keep_browser" == "true" ]] && echo "    --browser-keep-browser \\" >&2
-        echo "    --notify --heartbeat 30 \\" >&2
+        echo "    --heartbeat 30 \\" >&2
         echo "    -p \"<prompt>\"" >&2
         exit $EXIT_SUCCESS
     fi
@@ -2516,6 +2516,7 @@ run_round() {
     fi
 
     # Build Oracle command
+    # Note: --notify removed due to Oracle 0.8.4 bug (flag documented but not implemented)
     local oracle_args=(
         --engine browser
         -m "$model"
@@ -2523,7 +2524,6 @@ run_round() {
         --slug "$slug"
         --write-output "$output_file"
         --files-report
-        --notify
         --heartbeat 30
     )
 
@@ -4771,6 +4771,7 @@ robot_run() {
     fi
 
     # Build Oracle command
+    # Note: --notify removed due to Oracle 0.8.4 bug (flag documented but not implemented)
     local oracle_args=(
         --engine browser
         -m "$model"
@@ -4778,7 +4779,6 @@ robot_run() {
         --slug "$slug"
         --write-output "$output_file"
         --files-report
-        --notify
         --heartbeat 30
         -p "$prompt"
     )
