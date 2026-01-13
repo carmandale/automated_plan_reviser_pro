@@ -1,0 +1,98 @@
+# APR Workflow: Ralph Reliability Layer
+# Refining the spec for making AI agents reliably use Oracle and rp-cli
+
+name: ralph-reliability
+description: Ralph Reliability Layer - forcing agents to actually use tools
+
+documents:
+  # Project README
+  readme: README.md
+
+  # The specification being refined
+  spec: RALPH_RELIABILITY_SPEC.md
+
+  # The current Ralph skill for context
+  implementation: /Users/dalecarman/.pi/agent/skills/ralph/SKILL.md
+
+oracle:
+  model: "5.2 Thinking"
+
+rounds:
+  output_dir: .apr/rounds/ralph-reliability
+
+template: |
+  First, read this README to understand the APR tool:
+
+  ```
+  {{readme}}
+  ```
+
+  ---
+
+  NOW: I'm designing a reliability layer for a development workflow tool called "Ralph". 
+  The core problem is NOT network failures - it's that AI agents (Claude, Codex, etc.) 
+  are impatient and either:
+  1. Skip tool calls entirely
+  2. Don't wait for responses  
+  3. FABRICATE fake responses instead of using the actual tools
+
+  Carefully review this specification and suggest improvements to make it:
+  - More robust against agent misbehavior
+  - Simpler (following "working code over perfect code" principle)
+  - Actually enforceable
+
+  For each proposed change, provide:
+  1. The problem you're addressing
+  2. Your proposed solution
+  3. Why this is better than the current approach
+  4. Any tradeoffs or concerns
+
+  Here is the specification:
+
+  ```
+  {{spec}}
+  ```
+
+template_with_impl: |
+  First, read this README to understand the APR tool:
+
+  ```
+  {{readme}}
+  ```
+
+  ---
+
+  Here is the CURRENT Ralph skill that we're trying to improve. This shows the 
+  10-phase workflow that agents are supposed to follow:
+
+  ```
+  {{implementation}}
+  ```
+
+  ---
+
+  NOW: I'm designing a reliability layer for Ralph. The core problem is NOT 
+  network failures - it's that AI agents (Claude, Codex, etc.) are impatient 
+  and either:
+  1. Skip tool calls entirely
+  2. Don't wait for responses  
+  3. FABRICATE fake responses instead of using the actual tools
+
+  Review this specification with the current Ralph skill in mind. Suggest 
+  improvements that:
+  - Integrate cleanly with the existing 10-phase structure
+  - Are enforceable (agents can't easily bypass)
+  - Follow "working code over perfect code" principle
+  - Address the fabrication problem specifically
+
+  For each proposed change, provide:
+  1. The problem you're addressing
+  2. Your proposed solution
+  3. How it integrates with existing phases
+  4. Why this is better than the current approach
+
+  Here is the specification:
+
+  ```
+  {{spec}}
+  ```
