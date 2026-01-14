@@ -29,9 +29,28 @@ This is NOT a network reliability problem. This is an **agent discipline problem
 
 ## Design Principle
 
-> **Stop making enforcement depend on the agent following instructions. Put the enforcement into Ralph (phase gates + subcommands) so the agent can't "talk its way past" Phase 4/5/7/10.**
+> **Stop making enforcement depend on the agent following instructions. Put the enforcement into Ralph (phase gates + subcommands) so the agent can't "talk its way past" any phase.**
 
 ## Hard Rules
+
+### All Phases Require Artifacts
+
+Every phase requires on-disk artifacts before `ralph advance` succeeds:
+
+| Phase | Required Artifact | Lint Check |
+|-------|-------------------|------------|
+| Phase 1 (Research) | `research.md` | Contains `## Files Inspected` with existing paths |
+| Phase 2 (Interview) | `interview.md` | Contains 5 categories: Scope, Location, Behavior, Edge Cases, Acceptance |
+| Phase 3 (Design) | `design.md` | Contains "Files to create/modify" section |
+| Phase 4 (Expert Review) | Receipt from `ralph review design` | Tool-backed verification |
+| Phase 5 (Oracle) | Receipt from `ralph oracle` | Tool-backed verification (APR) |
+| Phase 6 (Create Plan) | `plan.md` | Passes `ralph lint plan` |
+| Phase 7 (Plan Review) | Receipt from `ralph review plan` | Tool-backed verification |
+| Phase 8 (Finalize) | Approval receipt from `ralph approve` | TTY + challenge verified |
+| Phase 9 (Execute) | All gates pass via `ralph yolo` | Single choke point |
+| Phase 10 (Post Review) | Receipt from `ralph review post` | Tool-backed verification |
+
+**Rationale:** This closes the "narrative completion" hole for ALL phases, not just tool phases.
 
 ### Direct Tool Calls Don't Count Unless Imported
 
@@ -45,17 +64,32 @@ Agents should use Ralph wrappers:
 
 **Shell enforcement (ergonomic guardrail):** Ralph prepends a `.ralph/bin/` directory to `PATH` with shim scripts named `rp-cli`, `apr`, and `codex` that warn and redirect to wrapper commands. This is a guardrail, not a security boundary.
 
-**Import flow for external evidence:**
+### Import Restrictions
+
+Import is a privileged action with phase-specific rules:
+
+| Phase | Import Policy |
+|-------|--------------|
+| Phase 5 | **Allowed** - tool-backed verification via APR robot mode |
+| Phase 4, 7, 10 | **TTY-gated** - requires interactive TTY + challenge (same as waivers) |
+
 ```bash
+# Phase 5: freely importable (APR verification exists)
 ralph import-proof phase5 --from .apr/rounds/.../round_7.md
+
+# Phase 4/7/10: requires TTY + challenge
+ralph import-proof phase4 --from external-review.txt  # Will prompt for TTY challenge
 ```
 
-Import performs:
-1. Hashes the provided artifact
-2. Tool-backed verification where possible (Phase 5 queries APR)
-3. Writes a Ralph-style receipt marked `imported: true`
+**Configuration:**
+```yaml
+# .ralph/config.yaml
+import:
+  allow_imported_receipts: true  # Set false to reject all imports at gates
+  phase5_free_import: true       # Phase 5 doesn't require TTY
+```
 
-**Rationale:** This makes enforcement depend on Ralph's gate checks, not on brittle "don't do X" rules. If you didn't get a Ralph receipt (directly or via import), you can't advance.
+**Rationale:** Removes "receipt laundering" path while preserving legitimate Phase 5 imports.
 
 ### Phase Completion Requires `ralph advance`
 
@@ -65,9 +99,12 @@ Every phase transition requires explicit CLI confirmation:
 ralph advance <phase>  # The ONLY way to complete a phase
 ```
 
-Add to each phase in the skill: *"Complete this phase by running `ralph advance <phase>`"*
+`advance` checks:
+1. Required artifact exists
+2. Artifact passes lint (non-tool phases) or receipt verifies (tool phases)
+3. Input hashes match (tool phases)
 
-This applies to ALL phases, not just gated ones. Eliminates "narrative completion."
+This applies to ALL phases. Eliminates "narrative completion."
 
 ## Core Architecture
 
@@ -111,19 +148,33 @@ On any command that checks status (`ralph status`, `ralph gates`, `ralph advance
     }
   },
   "phases": {
-    "research": {"status": "complete"},
-    "interview": {"status": "complete"},
-    "design": {"status": "complete"},
+    "research": {
+      "status": "complete",
+      "artifact": "research.md",
+      "artifact_sha256": "a1b2c3..."
+    },
+    "interview": {
+      "status": "complete",
+      "artifact": "interview.md",
+      "artifact_sha256": "b2c3d4..."
+    },
+    "design": {
+      "status": "complete",
+      "artifact": "design.md",
+      "artifact_sha256": "c3d4e5..."
+    },
     "expert_review": {
       "status": "complete",
-      "receipt": "proofs/phase4-1736789012-abc123.receipt.json"
+      "receipt": "proofs/phase4-1736789012-abc123.receipt.json",
+      "input_sha256": "c3d4e5..."
     },
     "oracle": {
       "status": "running",
       "pid": 12345,
       "run_id": "apr-ralph-oracle-round-1",
       "started_at": "2026-01-13T12:35:00Z",
-      "expected_nonce": "ralph-2f8a9c"
+      "expected_nonce": "ralph-2f8a9c",
+      "input_sha256": "c3d4e5..."
     },
     "create_plan": {"status": "pending"},
     "plan_review": {"status": "pending"},
@@ -157,7 +208,8 @@ Phase transitions happen ONLY through Ralph CLI:
 ralph advance <phase>  # Only way to mark a phase complete
 ```
 
-- `advance` refuses unless required proof/waiver exists and **verifies**
+- `advance` refuses unless required artifact/receipt exists and **verifies**
+- `advance` checks input hashes match current artifacts (for tool phases)
 - `advance` updates cached status in `state.json`
 - Agent saying "Phase 4 done" is meaningless - Ralph must verify
 
@@ -165,10 +217,12 @@ ralph advance <phase>  # Only way to mark a phase complete
 
 | Gate | Requires |
 |------|----------|
-| Before Phase 6 | Phase 4 receipt verified |
-| Before Phase 6 (if Phase 5 enabled) | Phase 5 receipt verified (tool-backed) |
-| Before Phase 8 | Phase 7 receipt verified |
-| Before Phase 9 (`ralph yolo`) | Phase 8 approval + Phase 7 receipt (+ Phase 5 if applicable) |
+| Before Phase 4 | Phase 3 artifact (design.md) exists and passes lint |
+| Before Phase 6 | Phase 4 receipt verified, input hash matches design.md |
+| Before Phase 6 (if Phase 5 enabled) | Phase 5 receipt verified (tool-backed), input hash matches |
+| Before Phase 7 | Phase 6 artifact (plan.md) exists and passes `ralph lint plan` |
+| Before Phase 8 | Phase 7 receipt verified, input hash matches plan.md |
+| Before Phase 9 (`ralph yolo`) | Phase 8 approval receipt + all prior gates |
 | Before Phase 10 completes | Codex review receipt |
 
 ## Per-Loop Directory Structure
@@ -180,16 +234,22 @@ Each loop gets its own directory to prevent cross-loop confusion and receipt reu
 ├── loops/
 │   └── <loop_id>/
 │       ├── state.json
+│       ├── research.md              # Phase 1 artifact
+│       ├── interview.md             # Phase 2 artifact
+│       ├── design.md                # Phase 3 artifact
+│       ├── plan.md                  # Phase 6 artifact
 │       ├── proofs/
+│       │   ├── commit_phase4-<ts>-<id>.json  # Immutable nonce commitment
 │       │   ├── phase4-<ts>-<id>.out
 │       │   ├── phase4-<ts>-<id>.receipt.json
 │       │   └── ...
-│       ├── waivers/
-│       │   └── phase5-<ts>.json
-│       └── plan.md
-├── current                    # Pointer file containing current loop_id
-├── bin/                       # PATH shims
-└── config.yaml                # Verification policies
+│       ├── approvals/
+│       │   └── phase8-<ts>.json     # Phase 8 approval receipt
+│       └── waivers/
+│           └── phase5-<ts>.json
+├── current                          # Pointer file containing current loop_id
+├── bin/                             # PATH shims
+└── config.yaml                      # Verification policies
 ```
 
 All commands operate on the current loop unless `--loop <id>` is specified.
@@ -216,6 +276,34 @@ Every tool invocation produces two files (simplified from three):
 
 **Rationale:** Fewer artifacts = fewer things for agents to manipulate, less repo noise, simpler implementation.
 
+### Immutable Nonce Commitment Files
+
+Before invoking any tool phase, Ralph creates an immutable commitment file:
+
+```bash
+# When starting Phase 4:
+.ralph/loops/<loop_id>/proofs/commit_phase4-<ts>-<run_id>.json
+```
+
+```json
+{
+  "phase": "phase4",
+  "run_id": "abc123",
+  "nonce": "ralph-2f8a9c",
+  "input_sha256": "c3d4e5...",
+  "committed_at": "2026-01-13T12:30:00Z"
+}
+```
+
+Immediately after creation: `chmod 444 commit_*.json`
+
+**Verification requires:**
+- Commitment file exists
+- `commitment.nonce == receipt.nonce`
+- `commitment.input_sha256 == current_artifact_sha256`
+
+**Rationale:** Makes pre-commit tangible and harder to retrofit. An agent would need to create the commitment file before the tool was supposed to run.
+
 ### Receipt Schema (JSON - Primary)
 
 ```json
@@ -231,6 +319,12 @@ Every tool invocation produces two files (simplified from three):
   "transcript_path": "phase4-1736789012-abc123.out",
   "transcript_bytes": 4523,
   "transcript_sha256": "a1b2c3d4e5f6...",
+  "inputs": {
+    "design_path": "design.md",
+    "design_sha256": "c3d4e5f6g7h8...",
+    "selected_paths": ["src/console.ts", "src/panel.ts"],
+    "selection_sha256": "d4e5f6g7h8i9..."
+  },
   "evidence": {
     "kind": "rp-cli",
     "payload_hash": "b7c1..."
@@ -249,6 +343,40 @@ Every tool invocation produces two files (simplified from three):
 }
 ```
 
+### Input Hash Binding
+
+Receipts bind to the exact version of the artifact that was reviewed:
+
+| Phase | Input Binding |
+|-------|---------------|
+| Phase 4 | `inputs.design_sha256` - hash of design.md at review time |
+| Phase 5 | `inputs.design_sha256` (or bundle hash) |
+| Phase 7 | `inputs.plan_sha256` - hash of plan.md at review time |
+
+**Verification rule:** If `sha256(current_file) != receipt.inputs.*_sha256` → receipt invalid → gate blocks
+
+**Rationale:** Prevents "run review, edit artifact, proceed with stale receipt" pattern.
+
+### Auto-Select rp-cli Context
+
+Ralph wrappers automatically select context files for rp-cli:
+
+**`ralph review design` (Phase 4):**
+1. Parse `design.md` for file paths in "Files to modify/create" section
+2. Resolve existing paths (ignore non-existent "to create" paths)
+3. Call `rp-cli manage_selection` automatically
+4. Store `selected_paths[]` + `selection_sha256` in receipt
+
+**`ralph review plan` (Phase 7):**
+1. Parse `plan.md` "Files Changed" section
+2. Same process as above
+
+**Verification requires:**
+- `selected_paths` in receipt with at least N existing files
+- `selection_sha256` matches receipt
+
+**Rationale:** Removes high-variance "agent judgment step" that often gets skipped.
+
 ### Phase 5 Receipt (Tool-Backed Verification)
 
 Phase 5 receipts include APR's robot mode response for tool-backed verification:
@@ -266,6 +394,9 @@ Phase 5 receipts include APR's robot mode response for tool-backed verification:
   "transcript_path": "phase5-1736789500-def456.out",
   "transcript_bytes": 8291,
   "transcript_sha256": "c3d4e5f6g7h8...",
+  "inputs": {
+    "design_sha256": "c3d4e5f6g7h8..."
+  },
   "tool": {
     "kind": "apr",
     "apr_response": {
@@ -287,32 +418,18 @@ Phase 5 receipts include APR's robot mode response for tool-backed verification:
 }
 ```
 
-### Pre-Committed Nonce Challenge
-
-Nonces are **pre-committed** before tool invocation to make fabrication harder:
-
-1. When starting a phase, Ralph:
-   - Generates nonce
-   - Writes it to `state.json` as `expected_nonce`
-   - Only then invokes the tool
-
-2. Verification requires:
-   - `receipt.nonce == state.expected_nonce`
-   - Nonce appears in transcript/output
-   - For Phase 5: nonce appears in APR output file
-
-**Rationale:** This upgrades nonce from "self-consistency marker" to "workflow binding marker." An agent can't just fabricate a receipt—they'd also need to coordinate expected_nonce in state.json before the tool was supposed to run.
-
 ### Substance Checks (Anti-Fabrication)
 
 `ralph advance` verifies receipts have real content:
 
 | Phase | Minimum Bytes | Required Markers |
 |-------|---------------|------------------|
-| Phase 4 (rp-cli) | 2048 | `chat_name` or `"mode": "plan"` |
-| Phase 5 (APR) | 1024 | APR output file exists, nonce present |
-| Phase 7 (rp-cli) | 2048 | `chat_name` or `"mode": "plan"` |
+| Phase 4 (rp-cli) | 2048 | `chat_name` or `"mode": "plan"`, `RALPH_NONCE:` |
+| Phase 5 (APR) | 1024 | APR output file exists, `RALPH_NONCE:` present |
+| Phase 7 (rp-cli) | 2048 | `chat_name` or `"mode": "plan"`, `RALPH_NONCE:` |
 | Phase 10 (codex) | 512 | Recognizable review header/format |
+
+**Note:** `RALPH_NONCE:` is now required for Phase 4 and Phase 7 (not just Phase 5).
 
 ### Tool-Backed Verification (Phase 5)
 
@@ -336,21 +453,46 @@ Verification thresholds are defined in config, not scattered in code:
 ```yaml
 # .ralph/config.yaml
 verification:
+  phase1:
+    required_artifact: research.md
+    required_sections:
+      - "## Files Inspected"
+    min_file_paths: 3
+  phase2:
+    required_artifact: interview.md
+    required_sections:
+      - "Scope"
+      - "Location"
+      - "Behavior"
+      - "Edge Cases"
+      - "Acceptance"
+  phase3:
+    required_artifact: design.md
+    required_sections:
+      - "Files to"
   phase4:
     min_bytes: 2048
     required_patterns:
       - "chat_name"
-      - '"mode": "plan"'
+      - "RALPH_NONCE:"
+    requires_input_binding: true
   phase5:
     min_bytes: 1024
     requires_tool_backed_verify: true
     required_patterns:
       - "RALPH_NONCE:"
+    requires_input_binding: true
+  phase6:
+    required_artifact: plan.md
+    requires_lint: true
   phase7:
     min_bytes: 2048
     required_patterns:
       - "chat_name"
-      - '"mode": "plan"'
+      - "RALPH_NONCE:"
+    requires_input_binding: true
+  phase8:
+    requires_approval: true
   phase10:
     min_bytes: 512
     required_patterns:
@@ -363,18 +505,45 @@ verification:
 
 After Ralph creates proof artifacts:
 ```bash
-chmod 444 *.receipt.json *.out
+chmod 444 *.receipt.json *.out commit_*.json
 ```
 Raises friction for agent editing proofs. Not impossible to bypass, but stops common failure modes.
 
 ### Auto-Registration
 
 When Ralph runs a tool wrapper, it:
-1. Generates proof artifacts (out + receipt.json)
-2. Updates state.json with receipt path
-3. Makes files read-only
+1. Creates immutable commitment file
+2. Generates proof artifacts (out + receipt.json)
+3. Updates state.json with receipt path
+4. Makes files read-only
 
 No agent action required - proofs are automatically registered.
+
+## Plan Linter
+
+### `ralph lint plan`
+
+A lightweight linter that enforces plan hygiene:
+
+**Checks:**
+- Every task line contains WHAT + at least one file path pattern OR a `WHERE:` field
+- Every task contains `VERIFY:`
+- "Files Changed" table exists
+- Task count > 0
+- Optional: flag tasks over max character count (proxy for "too big")
+
+**Gating:**
+- `ralph advance create_plan` requires lint pass
+- `ralph review plan` wrapper refuses to run if lint fails
+- `ralph yolo` preflight refuses if lint fails
+
+```bash
+ralph lint plan                    # Check plan.md
+ralph lint plan --fix              # Suggest fixes (future)
+ralph lint plan --explain          # Show all failed rules
+```
+
+**Rationale:** Converts "best practice" into an enforceable rule. Improves downstream reliability more than almost any other low-effort change.
 
 ## Tool Wrapper Commands
 
@@ -388,6 +557,20 @@ All tool wrappers block until completion:
 | `ralph oracle` | 5 | Runs APR robot mode, blocks, writes proof |
 | `ralph review plan` | 7 | Runs rp-cli, blocks, writes proof |
 | `ralph review post` | 10 | Runs codex review, blocks, writes proof |
+
+### Auto-Context Selection
+
+Tool wrappers automatically select context:
+
+```bash
+ralph review design   # Parses design.md, selects files, runs rp-cli
+ralph review plan     # Parses plan.md, selects files, runs rp-cli
+```
+
+Manual override:
+```bash
+ralph review design --files src/foo.ts src/bar.ts  # Override auto-selection
+```
 
 ### Background Mode (Explicit)
 
@@ -438,14 +621,52 @@ apr robot run 1 -w ralph-oracle --wait  # Blocking execution
 # - log_file path
 ```
 
+## Phase 8 Approval System
+
+### `ralph approve` Command
+
+Phase 8 approval is a first-class receipt, not a narrative step:
+
+```bash
+ralph approve  # TTY required
+```
+
+**Process:**
+1. Prints gate status + plan hash + design hash
+2. Requires typing a challenge string (same pattern as waivers)
+3. Writes approval receipt
+
+**Approval Receipt:**
+```json
+{
+  "phase": "phase8",
+  "loop_id": "loop-2026-01-13-abc123",
+  "ts": 1736790000,
+  "design_sha256": "c3d4e5...",
+  "plan_sha256": "d4e5f6...",
+  "lint_passed": true,
+  "tty": true,
+  "user": "$USER",
+  "host": "hostname",
+  "pwd": "/path/to/project",
+  "confirmed_at": "2026-01-13T12:50:00Z",
+  "challenge_response": "APPROVE PLAN x8m3k"
+}
+```
+
+**Gate rule:** `ralph yolo` requires approval receipt AND hashes match current artifacts.
+
+**Rationale:** Prevents "approval theater." Ensures approval is for this specific plan/design version.
+
 ## Waiver System
 
 ### TTY-Gated Overrides
 
 **All override actions require interactive TTY:**
 - `ralph waive <phase>`
+- `ralph approve` (Phase 8)
+- `ralph import-proof phase4|phase7|phase10`
 - `ralph yolo --ignore-plan-lint`
-- Phase 8 approvals
 - Any future `--force` bypass flags
 
 **Rules:**
@@ -501,6 +722,7 @@ ralph robot gates            # Gate status (what's blocking)
 ralph robot run-phase <N>    # Execute a phase
 ralph robot verify-all       # Verify all receipts
 ralph robot yolo-preflight   # Pre-flight check only (no execution)
+ralph robot lint-plan        # Plan lint as JSON
 ```
 
 ### Response Format
@@ -526,25 +748,60 @@ All robot commands return a consistent envelope:
 - `not_found` - Resource doesn't exist
 - `validation_failed` - Receipt verification failed
 - `gate_blocked` - Gate not satisfied
+- `lint_failed` - Plan lint failed
+- `input_hash_mismatch` - Artifact changed after review
 - `tty_required` - Override requires interactive TTY
 - `tool_unavailable` - External tool (APR, rp-cli) not available
 
 **Rationale:** Agents can't "interpret" gates—they must consume structured output. This eliminates natural-language compliance issues.
 
-## Plan Document
+## `ralph yolo` - The Single Choke Point
 
-### PROOFS Block (Lint, Not Enforcement)
+`ralph yolo` is the unavoidable execution gateway. All gates are verified through this single choke point.
 
-The plan's `## PROOFS` section is a human-readable mirror, not source of truth:
+### Preflight (Mandatory)
 
-```markdown
-## PROOFS
-- phase4: proofs/phase4-1736789012-abc123.receipt.json
-- phase5: proofs/phase5-1736789500-def456.receipt.json
-- phase7: proofs/phase7-1736790000-ghi789.receipt.json
+Before execution, `ralph yolo` verifies:
+
+```
+Preflight Check:
+✓ Phase 1 artifact: research.md (verified, 5 files inspected)
+✓ Phase 2 artifact: interview.md (verified, 5 categories)
+✓ Phase 3 artifact: design.md (verified)
+✓ Phase 4 receipt: proofs/phase4-....receipt.json (verified, input hash match)
+✓ Phase 5 receipt: proofs/phase5-....receipt.json (verified, tool-backed)
+✓ Phase 6 artifact: plan.md (lint passed)
+✓ Phase 7 receipt: proofs/phase7-....receipt.json (verified, input hash match)
+✓ Phase 8 approval: approvals/phase8-....json (verified, hashes match)
+
+All gates satisfied. Proceeding with execution...
 ```
 
-`ralph validate-plan` checks that plan mirrors state.json (nice UX), but gates enforce against verified receipts directly.
+**If any check fails:** `BLOCKED BY: <specific failure>` and exits nonzero.
+
+**If any phase is "running":** Refuses and tells agent to `ralph wait <run_id>`.
+
+### Gate Check Implementation
+
+`ralph robot gates` and `ralph robot yolo-preflight` return the same internal gate-check result:
+
+```json
+{
+  "ok": false,
+  "code": "gate_blocked",
+  "data": {
+    "blocked_by": "phase7",
+    "reason": "input_hash_mismatch",
+    "details": {
+      "receipt_hash": "a1b2c3...",
+      "current_hash": "d4e5f6...",
+      "artifact": "plan.md"
+    }
+  }
+}
+```
+
+**Rationale:** Makes it impossible for agents to "talk their way into execution."
 
 ## Command Reference
 
@@ -553,19 +810,24 @@ The plan's `## PROOFS` section is a human-readable mirror, not source of truth:
 ```bash
 ralph init <feature-name>      # Initialize new ralph loop
 ralph status                   # Show current state (recomputes from receipts)
-ralph advance <phase>          # Mark phase complete (verifies receipt first)
-ralph run-phase <phase>        # Run tool phase + advance (phases 4/5/7/10)
+ralph advance <phase>          # Mark phase complete (verifies artifact/receipt first)
 ralph gates                    # Show gate status (what's blocking)
-ralph yolo                     # Execute (preflight verifies all gates)
+ralph yolo                     # Execute (preflight verifies ALL gates)
 ```
 
 ### Review Commands (Tool Wrappers)
 
 ```bash
-ralph review design            # Phase 4: rp-cli design review (blocking)
+ralph review design            # Phase 4: rp-cli design review (blocking, auto-context)
 ralph oracle                   # Phase 5: APR/Oracle review (blocking)
-ralph review plan              # Phase 7: rp-cli plan review (blocking)
+ralph review plan              # Phase 7: rp-cli plan review (blocking, auto-context)
 ralph review post              # Phase 10: codex review (blocking)
+```
+
+### Approval Command
+
+```bash
+ralph approve                  # Phase 8: TTY-gated approval with challenge
 ```
 
 ### Background & Wait
@@ -582,7 +844,9 @@ ralph retry <phase>            # Recover from stale/failed run
 ralph verify <receipt>         # Verify single receipt
 ralph verify-all               # Verify all receipts for current loop
 ralph verify --explain         # Show which verification rule failed
-ralph validate-plan            # Check plan mirrors state (lint)
+ralph lint plan                # Lint plan.md
+ralph lint plan --explain      # Show all lint failures
+ralph validate-plan            # Check plan mirrors state (deprecated, use lint)
 ralph audit                    # Human-friendly table of all proofs
 ralph show-proof <phase>       # Render human summary on demand
 ```
@@ -590,7 +854,8 @@ ralph show-proof <phase>       # Render human summary on demand
 ### Import Commands
 
 ```bash
-ralph import-proof <phase> --from <path>  # Import external evidence
+ralph import-proof phase5 --from <path>   # Free import (APR verification)
+ralph import-proof phase4 --from <path>   # TTY-gated import
 ```
 
 ### Waiver Commands (TTY Required)
@@ -608,39 +873,28 @@ ralph robot gates              # Gate status as JSON
 ralph robot run-phase <N>      # Execute phase, return JSON
 ralph robot verify-all         # Verify all receipts
 ralph robot yolo-preflight     # Pre-flight only
+ralph robot lint-plan          # Plan lint as JSON
 ralph robot help               # API documentation
 ```
-
-## `ralph yolo` Preflight
-
-Before execution, `ralph yolo` prints exactly what it verified:
-
-```
-Preflight Check:
-✓ Phase 4 receipt: proofs/phase4-....receipt.json (verified)
-✓ Phase 5 receipt: proofs/phase5-....receipt.json (verified, tool-backed)
-✓ Phase 7 receipt: proofs/phase7-....receipt.json (verified)
-✓ Plan/state coherence: validate-plan passed
-✓ Phase 8 approval: confirmed
-
-All gates satisfied. Proceeding with execution...
-```
-
-If any missing: `BLOCKED BY GATE X` and exits nonzero.
 
 ## `ralph audit` Output
 
 Quick human sanity check:
 
 ```
-┌─────────┬──────────┬─────────────────────────────────┬─────────────┬────────┬──────┬───────┐
-│ Phase   │ Status   │ Receipt                         │ Timestamp   │ Tool   │ Exit │ Bytes │
-├─────────┼──────────┼─────────────────────────────────┼─────────────┼────────┼──────┼───────┤
-│ phase4  │ complete │ phase4-1736789012-abc123.json   │ 12:30:12    │ rp-cli │ 0    │ 4523  │
-│ phase5  │ complete │ phase5-1736789500-def456.json   │ 12:38:20    │ apr    │ 0    │ 8291  │
-│ phase7  │ complete │ phase7-1736790000-ghi789.json   │ 12:46:40    │ rp-cli │ 0    │ 3892  │
-│ phase10 │ pending  │ -                               │ -           │ -      │ -    │ -     │
-└─────────┴──────────┴─────────────────────────────────┴─────────────┴────────┴──────┴───────┘
+┌─────────┬──────────┬─────────────────────────────────┬─────────────┬────────┬──────┬───────┬────────────┐
+│ Phase   │ Status   │ Artifact/Receipt                │ Timestamp   │ Tool   │ Exit │ Bytes │ Input Hash │
+├─────────┼──────────┼─────────────────────────────────┼─────────────┼────────┼──────┼───────┼────────────┤
+│ phase1  │ complete │ research.md                     │ 10:15:00    │ -      │ -    │ 2.1K  │ -          │
+│ phase2  │ complete │ interview.md                    │ 10:20:00    │ -      │ -    │ 1.8K  │ -          │
+│ phase3  │ complete │ design.md                       │ 10:45:00    │ -      │ -    │ 3.2K  │ -          │
+│ phase4  │ complete │ phase4-1736789012-abc123.json   │ 12:30:12    │ rp-cli │ 0    │ 4523  │ ✓ match    │
+│ phase5  │ complete │ phase5-1736789500-def456.json   │ 12:38:20    │ apr    │ 0    │ 8291  │ ✓ match    │
+│ phase6  │ complete │ plan.md (lint: ✓)               │ 12:42:00    │ -      │ -    │ 4.1K  │ -          │
+│ phase7  │ complete │ phase7-1736790000-ghi789.json   │ 12:46:40    │ rp-cli │ 0    │ 3892  │ ✓ match    │
+│ phase8  │ complete │ phase8-1736790100.json          │ 12:48:20    │ -      │ -    │ -     │ ✓ match    │
+│ phase10 │ pending  │ -                               │ -           │ -      │ -    │ -     │ -          │
+└─────────┴──────────┴─────────────────────────────────┴─────────────┴────────┴──────┴───────┴────────────┘
 ```
 
 ## Implementation Phases
@@ -648,31 +902,34 @@ Quick human sanity check:
 ### Phase 1: Core Infrastructure
 - [ ] Per-loop `.ralph/loops/<loop_id>/` directory structure
 - [ ] `state.json` as cache, receipts as truth
-- [ ] Receipt schema + generation
+- [ ] Receipt schema + generation with input hashes
 - [ ] Hash verification
-- [ ] Pre-committed nonces
+- [ ] Pre-committed nonces with immutable commitment files
+- [ ] Non-tool phase artifact requirements
 
 ### Phase 2: Tool Wrappers
-- [ ] `ralph review design` (rp-cli + proof)
+- [ ] `ralph review design` (rp-cli + proof + auto-context selection)
 - [ ] `ralph oracle` (APR robot mode + proof + tool-backed verification)
-- [ ] `ralph review plan` (rp-cli + proof)
+- [ ] `ralph review plan` (rp-cli + proof + auto-context selection)
 - [ ] `ralph review post` (codex + proof)
 
 ### Phase 3: Phase Gates
 - [ ] Gate checking logic with receipt verification
-- [ ] `ralph advance` command (verifies before advancing)
+- [ ] Input hash binding verification
+- [ ] `ralph advance` command (verifies artifacts/receipts before advancing)
 - [ ] Tool-backed verification for Phase 5
-- [ ] Integration with `ralph yolo`
+- [ ] `ralph yolo` as single choke point
 
 ### Phase 4: Verification & Audit
 - [ ] `ralph verify` / `ralph verify-all`
 - [ ] `ralph verify --explain` (data-driven rules)
-- [ ] `ralph audit` table output
+- [ ] `ralph lint plan` with all checks
+- [ ] `ralph audit` table output with input hash status
 - [ ] `ralph show-proof` (on-demand human summary)
-- [ ] `ralph validate-plan` (lint)
 
-### Phase 5: Waiver System
+### Phase 5: Approval & Waiver System
 - [ ] TTY detection and challenge
+- [ ] `ralph approve` command with artifact hash binding
 - [ ] `ralph waive` with confirmation
 - [ ] Waiver receipt generation
 - [ ] Gate integration (proof OR waiver)
@@ -681,22 +938,26 @@ Quick human sanity check:
 - [ ] `ralph robot status/gates/verify-all`
 - [ ] `ralph robot run-phase`
 - [ ] `ralph robot yolo-preflight`
-- [ ] Consistent JSON envelope
+- [ ] `ralph robot lint-plan`
+- [ ] Consistent JSON envelope with detailed error codes
 
 ### Phase 7: Recovery & Import
 - [ ] Stale run detection
 - [ ] `ralph retry` command
-- [ ] `ralph import-proof` command
+- [ ] `ralph import-proof` with TTY-gating for non-Phase-5
 
 ## Success Criteria
 
-1. **Agents actually call tools** - Receipts exist with valid transcripts
+1. **All phases are artifact-gated** - No phase completes without verifiable work product
 2. **Receipts are verifiable** - SHA256 hashes match, substance checks pass, tool-backed verification for Phase 5
-3. **Phases are gated** - `ralph yolo` fails without verified receipts
-4. **Skips are explicit** - Waivers require TTY + challenge, create audit trail
-5. **Receipts are authoritative** - Not state.json status, not agent narrative
-6. **Human can audit** - `ralph audit` provides quick verification
-7. **Machines can query** - `ralph robot` provides structured JSON API
+3. **Input binding works** - Reviews are invalidated if artifacts change afterward
+4. **Phases are gated** - `ralph yolo` fails without verified receipts/artifacts
+5. **Skips are explicit** - Waivers require TTY + challenge, create audit trail
+6. **Approvals are binding** - Phase 8 approval binds to specific artifact versions
+7. **Plans are linted** - Malformed plans block execution
+8. **Receipts are authoritative** - Not state.json status, not agent narrative
+9. **Human can audit** - `ralph audit` provides quick verification
+10. **Machines can query** - `ralph robot` provides structured JSON API
 
 ## Open Questions
 
@@ -704,3 +965,4 @@ Quick human sanity check:
 2. How long should loops be retained before archival?
 3. Should there be a `ralph clean` to remove old loop directories?
 4. What's the right TTY challenge complexity? (Balance security vs. annoyance)
+5. Should `ralph lint plan` have auto-fix capability?
