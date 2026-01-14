@@ -64,32 +64,54 @@ Agents should use Ralph wrappers:
 
 **Shell enforcement (ergonomic guardrail):** Ralph prepends a `.ralph/bin/` directory to `PATH` with shim scripts named `rp-cli`, `apr`, and `codex` that warn and redirect to wrapper commands. This is a guardrail, not a security boundary.
 
-### Import Restrictions
+### Import Restrictions (Verify-Then-Adopt)
 
-Import is a privileged action with phase-specific rules:
+**Key principle:** Import is never "trust me." Import is "verify externally, then record a new Ralph receipt."
+
+Import is a privileged action with phase-specific verification:
 
 | Phase | Import Policy |
 |-------|--------------|
-| Phase 5 | **Allowed** - tool-backed verification via APR robot mode |
-| Phase 4, 7, 10 | **TTY-gated** - requires interactive TTY + challenge (same as waivers) |
+| Phase 5 | **Verify + adopt** - queries APR robot mode to confirm completion |
+| Phase 4, 7, 10 | **TTY-gated** - if tool-backed verify unavailable, requires TTY + challenge |
+
+#### Phase 5 Import (Tool-Backed Verify)
 
 ```bash
-# Phase 5: freely importable (APR verification exists)
 ralph import-proof phase5 --from .apr/rounds/.../round_7.md
-
-# Phase 4/7/10: requires TTY + challenge
-ralph import-proof phase4 --from external-review.txt  # Will prompt for TTY challenge
 ```
+
+**Import process:**
+1. Parse the file for `slug`, `output_file`, nonce, hash
+2. Run `apr robot history/status` to confirm completion
+3. Write a fresh Ralph-signed receipt pointing at the verified session
+4. Mark `imported: true` in receipt
+
+#### Phase 4/7/10 Import (TTY-Gated or Tool-Backed)
+
+```bash
+ralph import-proof phase4 --from external-review.txt
+```
+
+**If tool-backed rp-cli verification exists:**
+1. Parse for `chat_id`, nonce, hash
+2. Query rp-cli to verify session
+3. Write Ralph-signed receipt
+
+**If tool-backed verify unavailable:**
+1. Require TTY + challenge (same as waivers)
+2. Write receipt with `imported: true`, `tty_verified: true`
 
 **Configuration:**
 ```yaml
 # .ralph/config.yaml
 import:
   allow_imported_receipts: true  # Set false to reject all imports at gates
-  phase5_free_import: true       # Phase 5 doesn't require TTY
+  phase5_verify_before_adopt: true
+  phase4_require_tool_backed: false  # If true, disallow TTY fallback
 ```
 
-**Rationale:** Removes "receipt laundering" path while preserving legitimate Phase 5 imports.
+**Rationale:** Eliminates "receipt laundering" as a practical bypass. Preserves import ergonomics while centralizing enforcement in Ralph.
 
 ### Phase Completion Requires `ralph advance`
 
@@ -260,6 +282,49 @@ All commands operate on the current loop unless `--loop <id>` is specified.
 - Audit becomes cleaner
 - No accidental cross-loop receipt reuse
 
+### External Proof Storage (Optional)
+
+**Problem:** Even with `chmod 444`, keeping proofs inside `.ralph/` means agents are "already in the neighborhood" and can overwrite/delete/replace.
+
+**Solution:** Config option for proof root outside the repo:
+
+```yaml
+# .ralph/config.yaml or environment variable
+proof_root: ~/.local/share/ralph/proofs/  # Default: .ralph/loops/
+# Or: RALPH_PROOF_ROOT=~/.local/share/ralph/proofs/
+```
+
+**External structure:**
+```
+~/.local/share/ralph/
+├── secret.key                  # Signing key (chmod 600)
+└── proofs/
+    └── <project-slug>/
+        └── <loop_id>/
+            ├── proofs/
+            │   ├── commit_phase4-*.json
+            │   ├── phase4-*.receipt.json
+            │   └── ...
+            ├── approvals/
+            └── waivers/
+```
+
+**In repo (if external):**
+```
+.ralph/
+├── current                     # Pointer to current loop_id
+├── loops/
+│   └── <loop_id>/
+│       ├── state.json          # Minimal state + pointers
+│       ├── research.md         # Human-readable artifacts
+│       ├── design.md
+│       └── plan.md
+├── bin/                        # PATH shims
+└── config.yaml
+```
+
+**Rationale:** Reduces "easy edit surface area" for proofs. Consistent with escalation path ("store proofs outside the agent's writable workspace").
+
 ## Proof System
 
 ### Two-File Proof Artifacts
@@ -357,6 +422,56 @@ Receipts bind to the exact version of the artifact that was reviewed:
 
 **Rationale:** Prevents "run review, edit artifact, proceed with stale receipt" pattern.
 
+### Review-Edit-Review Workflow
+
+**Important:** Hash binding means the intended workflow is:
+
+1. Phase 3/6 produces a **draft** artifact
+2. Phase 4/7 reviews it
+3. **Apply feedback** (edit the artifact)
+4. **Re-run the review wrapper** to produce receipt for the final artifact
+5. Immediately `ralph advance phase4/phase7`
+
+**Key rule:** If you change `design.md` (or `plan.md`) after review, you must re-run the review wrapper; otherwise gates will block.
+
+**Why this matters:** The skill text should not say "run review → process feedback → update artifact → advance." That's logically inverted relative to hash-binding. The correct sequence is:
+- Draft → review → edit → **re-review** → advance
+
+This prevents agents from interpreting gate failures as "Ralph being annoying" and trying to bypass. Aligns agent mental model with enforcement model.
+
+### Artifact Hash Injection + ACK Blocks
+
+**Problem:** Input hashes in receipts prove what we *claimed* to review, but don't force the tool output itself to acknowledge the specific version.
+
+**Solution:** Inject hashes into the tool prompt and require them echoed back.
+
+**When Ralph constructs the rp-cli/APR/codex prompt, inject:**
+```
+RALPH_NONCE: <nonce>
+DESIGN_SHA256: <hash>   # or PLAN_SHA256: <hash>
+```
+
+**Instruct reviewer tool to start response with ACK block:**
+```
+ACK:
+RALPH_NONCE: ralph-2f8a9c
+DESIGN_SHA256: c3d4e5f6g7h8...
+```
+
+**Phase-specific usage:**
+| Phase | Hash Injected |
+|-------|--------------|
+| Phase 4 | `DESIGN_SHA256` |
+| Phase 5 | `DESIGN_SHA256` (or bundle hash) |
+| Phase 7 | `PLAN_SHA256` |
+
+**Verification requires:**
+- ACK block present in transcript
+- Nonce in ACK matches expected nonce
+- Hash in ACK matches receipt's input hash
+
+**Rationale:** Tightens coupling between "the artifact version" and "the tool output." Improves strength of both local substance checks and any tool-backed transcript retrieval checks.
+
 ### Auto-Select rp-cli Context
 
 Ralph wrappers automatically select context files for rp-cli:
@@ -420,7 +535,9 @@ Phase 5 receipts include APR's robot mode response for tool-backed verification:
 
 ### Substance Checks (Anti-Fabrication)
 
-`ralph advance` verifies receipts have real content:
+`ralph advance` verifies receipts have real content beyond simple markers:
+
+#### Basic Checks (Minimum)
 
 | Phase | Minimum Bytes | Required Markers |
 |-------|---------------|------------------|
@@ -429,11 +546,53 @@ Phase 5 receipts include APR's robot mode response for tool-backed verification:
 | Phase 7 (rp-cli) | 2048 | `chat_name` or `"mode": "plan"`, `RALPH_NONCE:` |
 | Phase 10 (codex) | 512 | Recognizable review header/format |
 
+#### Structure Checks (Strengthened)
+
+**Problem:** Marker checks are easy to fake with a single fabricated blob.
+
+**Solution:** Add structure-level checks that are hard to fake accidentally and annoying to fake deliberately:
+
+**For rp-cli phases (4/7), require transcript evidence of:**
+- A `manage_selection` call was made
+- A `chat_send` call was made
+- Minimum count of selected files that actually exist
+- `selection_sha256` matches receipt (or selected paths appear in transcript)
+- ACK block with `DESIGN_SHA256:` / `PLAN_SHA256:` (see below)
+
+**For APR phase (5), additionally require:**
+- `apr_response.slug` appears in transcript
+- Transcript includes at least one APR "completed/running" status line
+
+```yaml
+# .ralph/config.yaml
+verification:
+  phase4:
+    structure_checks:
+      require_manage_selection: true
+      require_chat_send: true
+      min_selected_files: 2
+      require_ack_block: true
+  phase7:
+    structure_checks:
+      require_manage_selection: true
+      require_chat_send: true
+      min_selected_files: 2
+      require_ack_block: true
+  phase5:
+    structure_checks:
+      require_slug_in_transcript: true
+      require_status_line: true
+```
+
+**Rationale:** Makes "fabricate one fake paragraph" insufficient; you'd need to fabricate a multi-step, internally consistent transcript—exactly what lazy agents don't do.
+
 **Note:** `RALPH_NONCE:` is now required for Phase 4 and Phase 7 (not just Phase 5).
 
-### Tool-Backed Verification (Phase 5)
+### Tool-Backed Verification
 
-Phase 5 verification queries APR's session registry, not just local files:
+Tool phases query external registries, not just local files:
+
+#### Phase 5 (APR/Oracle)
 
 ```bash
 # During ralph advance phase5 (and ralph yolo preflight):
@@ -444,7 +603,46 @@ apr robot history                   # Confirm session slug exists and completed
 
 **If APR can't be queried:** Phase 5 is BLOCKED, not soft-pass.
 
-**Rationale:** Agents can fabricate local files, but they can't fabricate APR's internal session history.
+#### Phases 4 & 7 (rp-cli)
+
+**Goal:** Make rp-cli phases "tool-backed" like Phase 5 to prevent fabrication.
+
+**A. Capture stable rp-cli identifier at runtime:**
+When `ralph review design` runs `rp-cli chat_send`, capture the stable identifier returned (e.g., `chat_id`, `conversation_id`, or slug). Store in receipt:
+```json
+{
+  "tool": {
+    "identifiers": {
+      "chat_id": "abc123-def456",
+      "chat_name": "Design Review: Console Panel"
+    }
+  }
+}
+```
+
+**B. Verify by querying rp-cli after the fact:**
+During `ralph advance phase4` / `ralph yolo preflight`:
+1. Call a read-only rp-cli command (e.g., `rp-cli get_chat`, `export_chat`, or `list_chats`) to retrieve chat metadata
+2. Verify the returned transcript contains:
+   - Exact `RALPH_NONCE:` value
+   - Artifact hash (see ACK block below)
+   - Sane timestamps (chat created after commitment)
+
+**C. Fallback if rp-cli lacks query capability:**
+If no tool-backed verify exists → force TTY-gated import/waiver for non-interactive acceptance. This stays aligned with the threat model (lazy agents are in scope, adversarial is out of scope).
+
+```yaml
+# .ralph/config.yaml
+verification:
+  phase4:
+    tool_backed_verify: true          # Try rp-cli query
+    fallback_to_tty_gate: true        # If query unavailable, require TTY
+  phase7:
+    tool_backed_verify: true
+    fallback_to_tty_gate: true
+```
+
+**Rationale:** Upgrades Phases 4/7 from "local file plausibility checks" to "prove the tool session exists," mirroring why Phase 5 is hard to fake.
 
 ### Data-Driven Verification Rules
 
@@ -509,6 +707,37 @@ chmod 444 *.receipt.json *.out commit_*.json
 ```
 Raises friction for agent editing proofs. Not impossible to bypass, but stops common failure modes.
 
+### Ralph-Signed Receipts
+
+**Problem:** Agents can write arbitrary `.receipt.json` files that satisfy marker/byte thresholds.
+
+**Solution:** Add a lightweight signing step so hand-written receipts don't verify:
+
+**Setup (on `ralph init`):**
+```bash
+# Generate or load machine-local secret (outside repo)
+~/.local/share/ralph/secret.key  # chmod 600
+```
+
+**Receipt signing:**
+When Ralph writes any receipt (phase4/5/7/10, approvals, waivers):
+1. Canonicalize JSON (stable key ordering)
+2. Compute `sig = HMAC-SHA256(secret, canonical_json_without_sig)`
+3. Store `sig` in the receipt
+
+```json
+{
+  "schema_version": "1.0.0",
+  "phase": "phase4",
+  ...
+  "sig": "a1b2c3d4e5f6..."
+}
+```
+
+**Verification rule:** Any receipt without a valid signature is rejected.
+
+**Threat model alignment:** This is not perfect crypto attestation (an adversarial agent could exfiltrate the key), but per the threat model it's a high-value tripwire against lazy fabrication. An agent must either (a) actually run Ralph wrappers, or (b) do key theft + custom signer—far beyond "impatient/skip" behavior.
+
 ### Auto-Registration
 
 When Ralph runs a tool wrapper, it:
@@ -571,6 +800,32 @@ Manual override:
 ```bash
 ralph review design --files src/foo.ts src/bar.ts  # Override auto-selection
 ```
+
+### Ensure Reviews (Ergonomic Helper)
+
+**Problem:** Agents skip steps because step-count is friction. Gates prevent harm but don't make success easy.
+
+**Solution:** Ergonomic command that runs missing review wrappers:
+
+```bash
+ralph ensure-reviews  # or: ralph run-reviews
+```
+
+**Behavior:**
+1. Checks gates for phase4/5/7/10 in order
+2. Runs missing wrappers blocking:
+   - Phase 4: `ralph review design`
+   - Phase 5: `ralph oracle` (if required)
+   - Phase 7: `ralph review plan`
+   - Phase 10: `ralph review post` (if applicable)
+3. Re-checks gates and prints pass/fail summary
+
+**Integration with yolo:**
+```bash
+ralph yolo --auto  # Calls ensure-reviews automatically when blocked
+```
+
+**Rationale:** You're not just blocking skipping—you're making compliance the path of least resistance. Especially effective against "impatient" agents: one command, fewer chances to wander.
 
 ### Background Mode (Explicit)
 
@@ -822,6 +1077,7 @@ ralph review design            # Phase 4: rp-cli design review (blocking, auto-c
 ralph oracle                   # Phase 5: APR/Oracle review (blocking)
 ralph review plan              # Phase 7: rp-cli plan review (blocking, auto-context)
 ralph review post              # Phase 10: codex review (blocking)
+ralph ensure-reviews           # Run all missing review wrappers in order
 ```
 
 ### Approval Command
