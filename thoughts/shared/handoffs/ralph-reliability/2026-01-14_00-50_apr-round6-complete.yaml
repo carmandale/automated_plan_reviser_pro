@@ -1,0 +1,65 @@
+---
+session: ralph-reliability
+date: 2026-01-14
+type: checkpoint
+status: partial
+outcome: SUCCEEDED
+---
+
+goal: Iterative refinement of Ralph Reliability Layer spec via APR workflow
+now: Integrate round 6 feedback OR run round 7 for further convergence
+
+test: apr stats -w ralph-reliability
+
+primary_bead: ""
+primary_bead_title: ""
+
+done_this_session:
+  - task: Reviewed APR repo and provided TLDR usage guide
+    files: []
+  - task: Integrated APR round 5 feedback (12 recommendations)
+    files: [RALPH_RELIABILITY_SPEC.md]
+  - task: Committed and pushed round 5 integration
+    files: []
+  - task: Backfilled APR metrics for rounds 1-5
+    files: [.apr/analytics/ralph-reliability/metrics.json]
+  - task: APR round 6 completed (user-initiated)
+    files: [.apr/rounds/ralph-reliability/round_6.md]
+
+decisions:
+  - "Agents cannot run APR/Oracle": Oracle requires user session context; agent-spawned processes return success but don't actually launch
+  - "TTY-gating is key enforcement": Most effective anti-bypass for waiver system
+  - "Receipts as truth, state as cache": Prevents state.json manipulation
+
+findings:
+  - "Round 5 output": 12 architectural changes including threat model, per-loop directories, tool-backed verification, TTY-gated waivers
+  - "Round 6 output": 8 changes extending enforcement to ALL phases, input hash binding, plan linter, Phase 8 approval receipts
+  - "Convergence at 9%": Still early, ~4 rounds estimated remaining
+  - "Agent APR limitation confirmed": apr robot run returns success JSON but Oracle never starts in agent context
+
+worked:
+  - APR robot mode for validation and structured output
+  - Systematic integration of GPT Pro feedback
+  - apr backfill --force to regenerate metrics
+
+failed:
+  - Agent-initiated apr robot run (process spawns but Oracle dies)
+  - bd create (stack overflow in daemon_autostart.go)
+
+blockers: []
+
+questions:
+  - What allows some agents to run Oracle successfully?
+  - Should round 6 be integrated now or run more rounds first?
+
+next:
+  - Integrate round 6 feedback into RALPH_RELIABILITY_SPEC.md (8 changes)
+  - Check convergence after integration
+  - Run rounds 7-8 if not converging
+  - Fix bd stack overflow bug (separate issue)
+
+files:
+  created: [thoughts/shared/handoffs/ralph-reliability/]
+  modified:
+    - RALPH_RELIABILITY_SPEC.md
+    - .apr/analytics/ralph-reliability/metrics.json
