@@ -15,7 +15,7 @@ documents:
   implementation: /Users/dalecarman/.pi/agent/skills/ralph/SKILL.md
 
 oracle:
-  model: "5.2 Thinking"
+  model: "gpt-5.2-pro"
 
 rounds:
   output_dir: .apr/rounds/ralph-reliability
